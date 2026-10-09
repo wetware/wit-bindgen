@@ -1,0 +1,31 @@
+//@ async = true
+package test:rust-cancel-wake;
+
+interface i {
+  record status {
+    registered: u32,
+    polls: u32,
+    dropped: u32,
+    delivered: u32,
+    root-dropped: bool,
+    waiting: bool,
+    sleeper-waiting: bool,
+    sleeper-completed: bool,
+  }
+
+  cancellable: async func(checkpoint: future, gate: future);
+  get-status: func() -> status;
+  wake-escaped: func();
+  sleep: async func();
+  wake-sleeper: func();
+}
+
+world test {
+  export i;
+}
+
+world runner {
+  import i;
+
+  export run: async func();
+}

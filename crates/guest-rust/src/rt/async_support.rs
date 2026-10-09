@@ -349,6 +349,13 @@ impl TaskState<'_> {
 
 impl Drop for TaskState<'_> {
     fn drop(&mut self) {
+        // No further wakeup notifications are needed once destruction starts.
+        // Destructors may wake other futures in this task, so suppress those
+        // notifications before cancelling the inter-task stream read.
+        self.shared
+            .sleep_state
+            .store(SLEEP_STATE_WOKEN, Ordering::Relaxed);
+
         // If there's an active read of the inter-task stream, go ahead and
         // cancel it, since we're about to drop the stream anyway.
         self.cancel_inter_task_stream_read();
@@ -443,7 +450,8 @@ impl SharedTaskState {
 
 /// Status for "this task is actively being polled"
 const SLEEP_STATE_POLLING: u32 = 0;
-/// Status for "this task has a wakeup scheduled, no more action need be taken".
+/// Status for "no further wakeup notification is needed", either because the
+/// task has already been woken or because it is being destroyed.
 const SLEEP_STATE_WOKEN: u32 = 1;
 /// Status for "this task is not being polled and has not been woken"
 ///
@@ -804,5 +812,44 @@ impl Drop for TaskCancelOnDrop {
         }
 
         unsafe { cancel() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn waking_cancelled_task() {
+        let shared = Arc::new(SharedTaskState {
+            sleep_state: AtomicU32::new(SLEEP_STATE_POLLING),
+            inter_task_stream: Default::default(),
+            waitables: Default::default(),
+            waitable_set: Default::default(),
+        });
+        let waker = Waker::from(shared.clone());
+        let weak = Arc::downgrade(&shared);
+        let mut task = TaskState {
+            // No futures or waitables are needed to exercise the lifetime of
+            // the shared waker, so this test can also run on native targets.
+            tasks: Default::default(),
+            shared,
+            waker: waker.clone(),
+            inter_task_wakeup: Default::default(),
+        };
+        task.shared
+            .sleep_state
+            .store(SLEEP_STATE_SLEEPING, Ordering::Relaxed);
+
+        assert_eq!(task.callback(EVENT_CANCEL, 0, 0), CallbackCode::Exit);
+        drop(task);
+
+        // Wakers can outlive their task. Neither repeated nor consuming wakes
+        // may try to notify the retired inter-task stream.
+        waker.wake_by_ref();
+        waker.wake_by_ref();
+        waker.clone().wake();
+        waker.wake();
+        assert!(weak.upgrade().is_none());
     }
 }
